@@ -1,0 +1,183 @@
+{
+  "name": "universal-agent-diff",
+  "displayName": "Universal Agent Diff",
+  "description": "Review any AI agent's file changes inline: accept or reject each change, including new and deleted files",
+  "version": "1.0.0",
+  "publisher": "mattsessa",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mattsessa/universal-agent-diff"
+  },
+  "engines": {
+    "vscode": "^1.144.0"
+  },
+  "icon": "images/icon.png",
+  "activationEvents": [
+    "workspaceContains:.git"
+  ],
+  "main": "./out/extension.js",
+  "enabledApiProposals": [
+    "editorInsets"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "interactiveDiff",
+          "title": "Universal Agent Diff",
+          "icon": "images/panel.svg"
+        }
+      ]
+    },
+    "views": {
+      "interactiveDiff": [
+        {
+          "id": "interactiveDiff.pending",
+          "name": "Agents",
+          "icon": "images/panel.svg"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "interactiveDiff.nextChange",
+        "title": "Next Pending Change",
+        "category": "Universal Agent Diff"
+      },
+      {
+        "command": "interactiveDiff.prevChange",
+        "title": "Previous Pending Change",
+        "category": "Universal Agent Diff"
+      },
+      {
+        "command": "interactiveDiff.openPending",
+        "title": "Open Pending File",
+        "category": "Universal Agent Diff"
+      },
+      {
+        "command": "interactiveDiff.acceptFile",
+        "title": "Accept All Changes in File",
+        "category": "Universal Agent Diff",
+        "icon": "$(check)"
+      },
+      {
+        "command": "interactiveDiff.rejectFile",
+        "title": "Reject All Changes in File",
+        "category": "Universal Agent Diff",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "interactiveDiff.acceptHunk",
+        "title": "Accept Change",
+        "category": "Universal Agent Diff"
+      },
+      {
+        "command": "interactiveDiff.rejectHunk",
+        "title": "Reject Change",
+        "category": "Universal Agent Diff"
+      },
+      {
+        "command": "interactiveDiff.deleteHunk",
+        "title": "Delete New File",
+        "category": "Universal Agent Diff"
+      },
+      {
+        "command": "interactiveDiff.acceptDeletion",
+        "title": "Accept Deletion",
+        "category": "Universal Agent Diff",
+        "icon": "$(check)"
+      },
+      {
+        "command": "interactiveDiff.restoreFile",
+        "title": "Reject Deletion (Restore File)",
+        "category": "Universal Agent Diff",
+        "icon": "$(discard)"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "interactiveDiff.openPending",
+          "when": "false"
+        },
+        {
+          "command": "interactiveDiff.acceptFile",
+          "when": "false"
+        },
+        {
+          "command": "interactiveDiff.rejectFile",
+          "when": "false"
+        },
+        {
+          "command": "interactiveDiff.acceptHunk",
+          "when": "false"
+        },
+        {
+          "command": "interactiveDiff.rejectHunk",
+          "when": "false"
+        },
+        {
+          "command": "interactiveDiff.deleteHunk",
+          "when": "false"
+        },
+        {
+          "command": "interactiveDiff.acceptDeletion",
+          "when": "false"
+        },
+        {
+          "command": "interactiveDiff.restoreFile",
+          "when": "false"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "interactiveDiff.acceptDeletion",
+          "when": "resourceScheme == interactive-diff-deleted",
+          "group": "navigation@1"
+        },
+        {
+          "command": "interactiveDiff.restoreFile",
+          "when": "resourceScheme == interactive-diff-deleted",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "interactiveDiff.acceptFile",
+          "when": "view == interactiveDiff.pending",
+          "group": "inline@1"
+        },
+        {
+          "command": "interactiveDiff.rejectFile",
+          "when": "view == interactiveDiff.pending",
+          "group": "inline@2"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "tsc",
+    "watch": "tsc -watch",
+    "lint": "eslint . && tsc --noEmit",
+    "lint:fix": "eslint . --fix",
+    "ts:check": "tsc --noEmit",
+    "package:vsix": "npx @vscode/vsce package -o universal-agent-diff.vsix",
+    "install:local": "npm run package:vsix && code --install-extension universal-agent-diff.vsix --force"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.19.2",
+    "@types/vscode": "^1.144.0",
+    "eslint": "^10.0.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-prettier": "^5.5.5",
+    "prettier": "^3.8.1",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.56.0"
+  },
+  "dependencies": {
+    "diff": "^9.0.0"
+  }
+}

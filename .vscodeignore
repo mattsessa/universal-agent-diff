@@ -1,0 +1,11 @@
+.github/**
+.vscode/**
+src/**
+out/**/*.map
+.gitignore
+.npmrc
+.prettierrc
+eslint.config.mjs
+tsconfig.json
+CLAUDE.md
+*.vsix
