@@ -67,8 +67,8 @@ Let your agent work. Every file it changes, creates or deletes shows up for revi
 
 - **Accept / Reject** appear above each change. Accept keeps it; Reject puts back what was there before. Either one jumps to the next change.
 - **New files** also get **Delete**: Reject empties the file, Delete removes it.
-- **Deleted files** appear in the side panel marked *deleted*. Click one to see what was removed, then use ✓ (keep deleted) or ↺ (restore) in the editor's top-right toolbar.
-- **Side panel**: the *Universal Agent Diff* icon in the Activity Bar lists files with pending changes. Hover a file for **Accept all** / **Reject all**.
+- **Deleted files** appear in the side panel marked _deleted_. Click one to see what was removed, then use ✓ (keep deleted) or ↺ (restore) in the editor's top-right toolbar.
+- **Side panel**: the _Universal Agent Diff_ icon in the Activity Bar lists files with pending changes. Hover a file for **Accept all** / **Reject all**.
 - **Navigate**: Command Palette → **Next Pending Change** / **Previous Pending Change** (bind them to keys if you like).
 - **Your own edits** made while a file is under review become part of that review. Edits to files with nothing pending are ignored.
 - **Reviews survive restarts.**
@@ -89,6 +89,27 @@ npm run install:local
 ```
 
 `install:local` packages the extension with `vsce` (via `npx`, nothing installed globally) and installs it with the `code` command. If `code` isn't found: Command Palette → **Shell Command: Install 'code' command in PATH**.
+
+## Releasing (maintainers)
+
+Pushing commits does **not** publish anything; a release is built only when a version tag is pushed.
+
+1. Commit everything, and test locally with `npm run install:local`.
+2. Bump the version, commit and tag in one step (`patch` = bug fixes, `minor` = new features, `major` = breaking changes):
+
+   ```sh
+   npm version patch        # e.g. 1.0.0 → 1.0.1, creates tag v1.0.1
+   git push --follow-tags   # pushes the commit and the tag
+   ```
+
+3. [`.github/workflows/release.yml`](.github/workflows/release.yml) builds `universal-agent-diff.vsix` and publishes it as a GitHub Release. Check the **Actions** tab; the "latest release" download link updates automatically.
+
+If a release fails, fix it, then move the tag to the new commit:
+
+```sh
+git tag -d v1.0.1 && git push origin :refs/tags/v1.0.1
+git tag v1.0.1 && git push origin v1.0.1
+```
 
 ## License
 

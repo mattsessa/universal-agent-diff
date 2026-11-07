@@ -31,7 +31,8 @@ Universal Agent Diff: an interactive diff view VS Code extension for reviewing A
 - Requires `"enable-proposed-api": ["mattsessa.universal-agent-diff"]` in `~/.vscode/argv.json`.
 - Without it, deletions fall back to red bar + hover.
 - Install: `npm run install:local`, then reload window.
-- Release: bump `version` in package.json, push tag `v<version>`; `.github/workflows/release.yml` builds the `.vsix` and attaches it to a GitHub Release.
+- Release: see "Releasing" in README.md. Give me the commands (`npm version patch|minor|major`, then `git push --follow-tags`); I run them myself. Pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds the `.vsix` and publishes a GitHub Release.
+- `.npmrc` sets `legacy-peer-deps=true` because typescript-eslint 8.56 declares a peer of TypeScript <6; remove it after upgrading typescript-eslint.
 - Internal IDs (`interactiveDiff.*` commands/views, storage key) keep the old prefix on purpose.
 
 ## Rules
