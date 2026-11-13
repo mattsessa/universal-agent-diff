@@ -23,6 +23,7 @@ Universal Agent Diff: an interactive diff view VS Code extension for reviewing A
 - Agent file deletions are reviewable: listed as "deleted"; Accept keeps it deleted, Reject restores it.
 - Next / Previous Pending Change commands (Command Palette).
 - Pending reviews persist across restarts; storage purged when empty.
+- Local debug log (Output → Universal Agent Diff), off by default (Debug log level): file paths and review decisions only, never contents; never leaves the machine. Disclosed in README.
 
 ## Notes
 

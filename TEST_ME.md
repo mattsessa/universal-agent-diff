@@ -70,3 +70,4 @@ Agent: delete `scratch.txt`.
 - Side panel: the Universal Agent Diff icon lists every file with pending changes. Hover a file for Accept all / Reject all.
 - Command Palette: Next Pending Change / Previous Pending Change.
 - Restart VS Code with a change pending: it's still there.
+- Debug log: Command Palette → Developer: Set Log Level… → Universal Agent Diff → Debug, then rerun any test and open Output → Universal Agent Diff. Each change is logged with its file path and what the extension decided, never file contents.

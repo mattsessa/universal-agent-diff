@@ -73,6 +73,15 @@ Let your agent work. Every file it changes, creates or deletes shows up for revi
 - **Your own edits** made while a file is under review become part of that review. Edits to files with nothing pending are ignored.
 - **Reviews survive restarts.**
 
+## Debug log (local only, off by default)
+
+The extension has a debug log for tracking down changes that weren't picked up for review, or were picked up wrongly. **It's off by default, never leaves your computer, and nothing is sent anywhere.**
+
+- **What it records:** file paths (relative to the repo) and what the extension decided about each change, e.g. "edited by an agent, review started" or "treated as my edit, ignored". **It never records file contents.** File names can still be sensitive, so look over a log before sharing it.
+- **Turn it on:** Command Palette → **Developer: Set Log Level…** → **Universal Agent Diff** → **Debug**. Set it back to **Info** to turn it off.
+- **View it:** **Output** panel → **Universal Agent Diff** in the dropdown. VS Code also keeps it in its local logs folder (Command Palette → **Developer: Open Extension Logs Folder**).
+- **Reporting a bug:** if a change didn't show up for review, turn the log on, reproduce the problem, and attach the relevant lines (edit out any file names you'd rather not share) to your [issue](https://github.com/mattsessa/universal-agent-diff/issues).
+
 ## Update
 
 Download the new `.vsix` from the [latest release](https://github.com/mattsessa/universal-agent-diff/releases/latest) and install it the same way. It replaces the old version.

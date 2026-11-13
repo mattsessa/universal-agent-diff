@@ -76,6 +76,18 @@ function newRangeOffsets(newText: string, hunk: Hunk): [number, number] {
   return [start, end];
 }
 
+// ─── Debug log ───────────────────────────────────────────────────────────────
+
+/**
+ * Local debug log (Output → Universal Agent Diff), for diagnosing missed or
+ * wrong reviews. Records repo-relative file paths and review decisions, never
+ * file contents. Written only at Debug / Trace log level, which is off by
+ * default (Developer: Set Log Level…). Stays on this machine: VS Code keeps it
+ * in its local logs folder; nothing is sent anywhere.
+ */
+let log: vscode.LogOutputChannel | undefined;
+const debug = (msg: string) => log?.debug(msg);
+
 // ─── State ───────────────────────────────────────────────────────────────────
 
 const STORAGE_KEY = 'interactiveDiff.snapshots';
@@ -175,6 +187,9 @@ class ReviewState implements vscode.Disposable {
         }
       }
     }
+    debug(
+      `init: startup tree has ${this.startPaths.size} files; restored ${this.snapshots.size} pending review(s)`,
+    );
     await this.persist();
   }
 
@@ -188,6 +203,7 @@ class ReviewState implements vscode.Disposable {
   }
 
   setSnapshot(rel: string, text: string): void {
+    debug(`${rel}: review ${this.snapshots.has(rel) ? 'updated' : 'started'}`);
     this.snapshots.set(rel, text);
     this.deleted.delete(rel);
     void this.persist();
@@ -197,6 +213,7 @@ class ReviewState implements vscode.Disposable {
   deleteSnapshot(rel: string): void {
     this.deleted.delete(rel);
     if (this.snapshots.delete(rel)) {
+      debug(`${rel}: review cleared`);
       void this.persist();
       this._onDidChangeSnapshots.fire();
     }
@@ -209,6 +226,7 @@ class ReviewState implements vscode.Disposable {
 
   /** Record that the agent deleted a file whose content was `before`. */
   markDeleted(rel: string, before: string): void {
+    debug(`${rel}: deletion review started`);
     this.snapshots.set(rel, before);
     this.deleted.add(rel);
     void this.persist();
@@ -712,11 +730,19 @@ function relOfDeletedUri(uri: vscode.Uri | undefined): string | undefined {
 // ─── Activation ──────────────────────────────────────────────────────────────
 
 export async function activate(context: vscode.ExtensionContext) {
-  const folder = vscode.workspace.workspaceFolders?.[0];
+  log = vscode.window.createOutputChannel('Universal Agent Diff', { log: true });
+  context.subscriptions.push(log);
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  const folder = folders[0];
   if (!folder) {
+    debug('activate: no workspace folder, not running');
     return;
   }
   const repoRoot = (await git(folder.uri.fsPath, ['rev-parse', '--show-toplevel'])).trim();
+  debug(
+    `activate: repo "${path.basename(repoRoot)}"; ${folders.length} workspace folder(s)` +
+      (folders.length > 1 ? ' (only the first is watched)' : ''),
+  );
   const state = new ReviewState(repoRoot, context.workspaceState);
   await state.init();
   const overlay = new ReviewOverlay(state);
@@ -754,14 +780,19 @@ export async function activate(context: vscode.ExtensionContext) {
   const onOpen = async (doc: vscode.TextDocument) => {
     const rel = state.relPath(doc);
     if (rel === undefined || doc.isDirty || state.getSnapshot(rel) !== undefined) {
+      if (rel !== undefined) {
+        debug(`${rel}: opened, skipped (${doc.isDirty ? 'unsaved edits' : 'review already open'})`);
+      }
       return;
     }
     const known = await state.knownContent(rel);
     if (known === undefined) {
+      debug(`${rel}: opened, not reviewed (.gitignored, .git or node_modules)`);
       return;
     }
     const text = doc.getText();
     if (text !== known) {
+      debug(`${rel}: opened, differs from last known content → agent change`);
       state.setSnapshot(rel, known);
     }
     state.lastSeen.set(rel, text);
@@ -782,20 +813,35 @@ export async function activate(context: vscode.ExtensionContext) {
   const onChange = async (e: vscode.TextDocumentChangeEvent) => {
     const doc = e.document;
     const rel = state.relPath(doc);
-    if (rel === undefined || e.contentChanges.length === 0 || !(await state.isReviewed(rel))) {
+    if (rel === undefined || e.contentChanges.length === 0) {
+      return;
+    }
+    if (!(await state.isReviewed(rel))) {
+      debug(`${rel}: edited, not reviewed (.gitignored, .git or node_modules)`);
       return;
     }
     const text = doc.getText();
     let fromDisk = false;
+    let diskInfo = 'disk not checked';
     if (!doc.isDirty && e.reason === undefined) {
       const disk = await readFile(doc.uri.fsPath, 'utf8').catch(() => null);
       fromDisk = disk === text && disk !== state.lastSeen.get(rel);
+      diskInfo =
+        disk === null
+          ? 'disk unreadable'
+          : `matches disk=${disk === text}, differs from last seen=${disk !== state.lastSeen.get(rel)}`;
     }
+    const info =
+      `dirty=${doc.isDirty}, reason=${e.reason ?? 'none'}, ` +
+      `active editor=${vscode.window.activeTextEditor?.document === doc}, ` +
+      `visible=${vscode.window.visibleTextEditors.some((ed) => ed.document === doc)}, ${diskInfo}`;
     if (fromDisk && (await state.matchesGit(rel, text))) {
       // Source control restored the file: not an agent; discard any review.
+      debug(`${rel}: edited (${info}) → reloaded from disk, matches git → source control`);
       state.deleteSnapshot(rel);
       state.lastSeen.set(rel, text);
     } else if (fromDisk) {
+      debug(`${rel}: edited (${info}) → reloaded from disk → agent change`);
       if (state.getSnapshot(rel) === undefined) {
         const before = state.lastSeen.get(rel) ?? (await state.knownContent(rel));
         if (before !== undefined && before !== text) {
@@ -803,6 +849,13 @@ export async function activate(context: vscode.ExtensionContext) {
         }
       }
       state.lastSeen.set(rel, text);
+    } else {
+      debug(
+        `${rel}: edited (${info}) → treated as my edit` +
+          (state.getSnapshot(rel) === undefined
+            ? ', no open review → ignored'
+            : ', joins open review'),
+      );
     }
     clearIfDone(doc);
     overlay.refresh();
@@ -825,17 +878,21 @@ export async function activate(context: vscode.ExtensionContext) {
       overlay.refresh();
     }
     if (!(await state.isReviewed(rel))) {
+      debug(`${rel}: changed on disk, not reviewed (.gitignored, .git or node_modules)`);
       return;
     }
     if (vscode.workspace.textDocuments.some((d) => d.uri.fsPath === uri.fsPath)) {
+      debug(`${rel}: changed on disk, open in VS Code → left to the editor change handler`);
       return;
     }
     const current = await readFile(uri.fsPath, 'utf8').catch(() => null);
     if (current === null || current.includes('\0')) {
-      return; // Directory, unreadable, or binary.
+      debug(`${rel}: changed on disk, skipped (folder, unreadable or binary)`);
+      return;
     }
     if (await state.matchesGit(rel, current)) {
       // Source control restored the file: not an agent; discard any review.
+      debug(`${rel}: changed on disk, matches git → source control`);
       state.deleteSnapshot(rel);
       state.lastSeen.set(rel, current);
       return;
@@ -847,7 +904,10 @@ export async function activate(context: vscode.ExtensionContext) {
         return; // .gitignored
       }
       if (before !== current) {
+        debug(`${rel}: changed on disk → agent change`);
         state.setSnapshot(rel, before);
+      } else {
+        debug(`${rel}: changed on disk, same as last known content → nothing to review`);
       }
     } else if (snapshot === current) {
       state.deleteSnapshot(rel);
@@ -884,8 +944,22 @@ export async function activate(context: vscode.ExtensionContext) {
       if (await exists(state.uri(r).fsPath)) {
         continue;
       }
-      const agent = !own && (await state.isReviewed(r)) && !(await state.deletedBySourceControl(r));
+      const reviewed = await state.isReviewed(r);
+      const bySourceControl = !own && reviewed && (await state.deletedBySourceControl(r));
+      const agent = !own && reviewed && !bySourceControl;
       const before = agent ? (state.getSnapshot(r) ?? (await state.knownContent(r))) : undefined;
+      debug(
+        `${r}: deleted → ` +
+          (own
+            ? 'by VS Code itself, ignored'
+            : !reviewed
+              ? 'not reviewed, ignored'
+              : bySourceControl
+                ? 'by source control, ignored'
+                : before
+                  ? 'agent deletion'
+                  : 'agent deletion, nothing to restore (new or empty file)'),
+      );
       if (before) {
         state.markDeleted(r, before);
       } else {
@@ -946,6 +1020,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
   /** Accept every pending change in a file: keep it as is and clear its review. */
   const acceptFile = async (rel: string) => {
+    debug(`${rel}: accept all`);
     state.deleteSnapshot(rel);
     const disk = await readFile(state.uri(rel).fsPath, 'utf8').catch(() => null);
     if (disk !== null) {
@@ -964,6 +1039,7 @@ export async function activate(context: vscode.ExtensionContext) {
     if (snapshot === undefined) {
       return;
     }
+    debug(`${rel}: reject all`);
     const uri = state.uri(rel);
     const doc = openDoc(rel);
     const wasDeleted = state.isDeleted(rel);
@@ -1121,6 +1197,10 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.workspace.onDidSaveTextDocument((doc) => {
       const rel = state.relPath(doc);
       if (rel !== undefined) {
+        debug(
+          `${rel}: saved in VS Code → recorded as last seen` +
+            (state.getSnapshot(rel) === undefined ? ' (no open review)' : ''),
+        );
         state.lastSeen.set(rel, doc.getText());
       }
     }),
@@ -1137,6 +1217,7 @@ export async function activate(context: vscode.ExtensionContext) {
         const found = await findHunk(uri, clicked);
         if (found) {
           const { doc, review, hunk } = found;
+          debug(`${review.rel}: accept change at line ${hunk.newStart + 1}`);
           state.setSnapshot(review.rel, applyHunk(review.snapshot, hunk));
           clearIfDone(doc);
           overlay.refresh();
@@ -1152,7 +1233,8 @@ export async function activate(context: vscode.ExtensionContext) {
       async (uri: vscode.Uri, clicked: Hunk) => {
         const found = await findHunk(uri, clicked);
         if (found) {
-          const { doc, hunk } = found;
+          const { doc, review, hunk } = found;
+          debug(`${review.rel}: reject change at line ${hunk.newStart + 1}`);
           const [start, end] = newRangeOffsets(doc.getText(), hunk);
           const edit = new vscode.WorkspaceEdit();
           edit.replace(
