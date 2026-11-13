@@ -90,6 +90,17 @@ const debug = (msg: string) => log?.debug(msg);
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
+/**
+ * Whether a repo-relative path is inside `.git` or `node_modules`. These are
+ * never reviewed, and disk events for them are dropped before doing any work:
+ * running git in response to a `.git` change can feed itself (e.g. git's
+ * fsmonitor daemon writes and deletes a cookie file for every git command).
+ */
+function isInternalPath(rel: string): boolean {
+  const parts = rel.split('/');
+  return parts.includes('.git') || parts.includes('node_modules');
+}
+
 const STORAGE_KEY = 'interactiveDiff.snapshots';
 
 interface StoredSnapshots {
@@ -337,11 +348,10 @@ class ReviewState implements vscode.Disposable {
    * `node_modules`; `.env` files always; otherwise only if not .gitignored.
    */
   async isReviewed(rel: string): Promise<boolean> {
-    const parts = rel.split('/');
-    if (parts.includes('.git') || parts.includes('node_modules')) {
+    if (isInternalPath(rel)) {
       return false;
     }
-    if (parts[parts.length - 1] === '.env') {
+    if (path.posix.basename(rel) === '.env') {
       return true;
     }
     return !(await this.isIgnored(rel));
@@ -869,7 +879,7 @@ export async function activate(context: vscode.ExtensionContext) {
    */
   const onDiskChange = async (uri: vscode.Uri) => {
     const rel = state.relPathOf(uri);
-    if (rel === undefined) {
+    if (rel === undefined || isInternalPath(rel)) {
       return;
     }
     state.clearDeleted(rel);
@@ -928,7 +938,7 @@ export async function activate(context: vscode.ExtensionContext) {
    */
   const onDiskDelete = async (uri: vscode.Uri) => {
     const rel = state.relPathOf(uri);
-    if (rel === undefined) {
+    if (rel === undefined || isInternalPath(rel)) {
       return;
     }
     if (path.basename(uri.fsPath) === '.gitignore') {
@@ -948,18 +958,23 @@ export async function activate(context: vscode.ExtensionContext) {
       const bySourceControl = !own && reviewed && (await state.deletedBySourceControl(r));
       const agent = !own && reviewed && !bySourceControl;
       const before = agent ? (state.getSnapshot(r) ?? (await state.knownContent(r))) : undefined;
-      debug(
-        `${r}: deleted → ` +
-          (own
-            ? 'by VS Code itself, ignored'
-            : !reviewed
-              ? 'not reviewed, ignored'
-              : bySourceControl
-                ? 'by source control, ignored'
-                : before
-                  ? 'agent deletion'
-                  : 'agent deletion, nothing to restore (new or empty file)'),
-      );
+      // Short-lived files never seen before (e.g. an agent's temp file during
+      // an atomic save) have nothing to restore or clear: don't log them.
+      const unseen = state.getSnapshot(r) === undefined && !state.lastSeen.has(r);
+      if (!(agent && !before && unseen)) {
+        debug(
+          `${r}: deleted → ` +
+            (own
+              ? 'by VS Code itself, ignored'
+              : !reviewed
+                ? 'not reviewed, ignored'
+                : bySourceControl
+                  ? 'by source control, ignored'
+                  : before
+                    ? 'agent deletion'
+                    : 'agent deletion, nothing to restore (new or empty file)'),
+        );
+      }
       if (before) {
         state.markDeleted(r, before);
       } else {
