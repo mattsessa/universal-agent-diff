@@ -36,6 +36,10 @@ Universal Agent Diff: an interactive diff view VS Code extension for reviewing A
 - `.npmrc` sets `legacy-peer-deps=true` because typescript-eslint 8.56 declares a peer of TypeScript <6; remove it after upgrading typescript-eslint.
 - Internal IDs (`interactiveDiff.*` commands/views, storage key) keep the old prefix on purpose.
 
+## Instructions
+
+- `.claude/CLAUDE.md` is a symlink to `.agents/rules/instructions.md`. Only edit `.agents/` files if necessary. Do not touch symlinks.
+
 ## Rules
 
 - Do not edit files prior to my explicit consent.
