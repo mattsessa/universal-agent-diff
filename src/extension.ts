@@ -101,6 +101,19 @@ function isInternalPath(rel: string): boolean {
   return parts.includes('.git') || parts.includes('node_modules');
 }
 
+/**
+ * Env files hold secrets and are usually .gitignored, but agents edit them, so
+ * they're always reviewed: `.env`, `.env.<anything>` (`.env.local`,
+ * `.env.sandbox`, `.env.production`, …), `<anything>.env` (`prod.env`), and
+ * direnv's `.envrc`. Keep `ENV_FILES_GLOB` in sync with `isEnvFile`.
+ */
+const ENV_FILES_GLOB = '**/{.env,.env.*,*.env,.envrc}';
+
+function isEnvFile(rel: string): boolean {
+  const name = path.posix.basename(rel);
+  return name.endsWith('.env') || name.startsWith('.env.') || name === '.envrc';
+}
+
 const STORAGE_KEY = 'interactiveDiff.snapshots';
 
 interface StoredSnapshots {
@@ -168,12 +181,13 @@ class ReviewState implements vscode.Disposable {
       (await git(this.repoRoot, ['rev-parse', '--git-path', 'index.lock'])).trim(),
     );
 
-    // .env files are usually .gitignored, so the startup tree doesn't have
-    // them. Remember their startup content directly so changes are tracked.
-    for (const uri of await vscode.workspace.findFiles('**/.env', '**/node_modules/**')) {
+    // Env files are usually .gitignored, so the startup tree doesn't have
+    // them. Remember their startup content directly so changes are tracked
+    // (without it, an agent's first edit would look like a brand-new file).
+    for (const uri of await vscode.workspace.findFiles(ENV_FILES_GLOB, '**/node_modules/**')) {
       const rel = this.relPathOf(uri);
       const text = await readFile(uri.fsPath, 'utf8').catch(() => null);
-      if (rel !== undefined && text !== null) {
+      if (rel !== undefined && isEnvFile(rel) && text !== null && !text.includes('\0')) {
         this.lastSeen.set(rel, text);
       }
     }
@@ -345,13 +359,14 @@ class ReviewState implements vscode.Disposable {
 
   /**
    * Whether a file takes part in reviews: never inside `.git` or
-   * `node_modules`; `.env` files always; otherwise only if not .gitignored.
+   * `node_modules`; env files always (see `isEnvFile`); otherwise only if
+   * not .gitignored.
    */
   async isReviewed(rel: string): Promise<boolean> {
     if (isInternalPath(rel)) {
       return false;
     }
-    if (path.posix.basename(rel) === '.env') {
+    if (isEnvFile(rel)) {
       return true;
     }
     return !(await this.isIgnored(rel));

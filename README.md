@@ -72,6 +72,7 @@ Let your agent work. Every file it changes, creates or deletes shows up for revi
 - **Navigate**: Command Palette → **Next Pending Change** / **Previous Pending Change** (bind them to keys if you like).
 - **Your own edits** made while a file is under review become part of that review. Edits to files with nothing pending are ignored.
 - **Reviews survive restarts.**
+- **Ignored files** (anything in `.gitignore`) aren't reviewed, except **env files**, which are always reviewed because agents often edit them and they hold secrets: `.env`, `.env.*` (e.g. `.env.local`, `.env.sandbox`, `.env.production`), `*.env` (e.g. `prod.env`), and `.envrc` (direnv). Their contents stay on your computer like everything else.
 
 ## Debug log (local only, off by default)
 

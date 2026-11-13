@@ -14,7 +14,7 @@ Universal Agent Diff: an interactive diff view VS Code extension for reviewing A
 - My edits join an open review; otherwise ignored.
 - Snapshot cleared once everything accepted or rejected.
 - Watches closed files; detects changes without opening them.
-- Tracks `.env` even though it's gitignored.
+- Tracks env files even though they're gitignored: `.env`, `.env.*`, `*.env`, `.envrc`.
 - Ignores changes restored by source control (discard, checkout).
 - Side panel lists pending files with count badge.
 - Hover file in panel: Accept all / Reject all.

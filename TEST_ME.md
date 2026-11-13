@@ -65,6 +65,24 @@ Agent: delete `scratch.txt`.
 
 ---
 
+## Test 6: Env files are always reviewed
+
+Env files (`.env`, `.env.*`, `*.env`, `.envrc`) are reviewed even when `.gitignore` ignores them.
+
+### Part A
+
+You: prompt your agent "Do test 6A in TEST_ME.md." Accept the new file.
+
+Agent: create a file named `.env.sandbox` next to this one, containing `API_URL=https://sandbox.example.com`.
+
+### Part B
+
+You: prompt your agent "Do test 6B in TEST_ME.md." Only the changed line should be under review, not the whole file. Reject it: `sandbox` comes back. Delete `.env.sandbox` when you're done.
+
+Agent: in `.env.sandbox` next to this file, change `sandbox` to `staging`.
+
+---
+
 ## Also try
 
 - Side panel: the Universal Agent Diff icon lists every file with pending changes. Hover a file for Accept all / Reject all.
