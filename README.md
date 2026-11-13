@@ -8,7 +8,7 @@ Review any AI agent's file changes right in the editor, line by line. Works with
 - Orange scrollbar marks show where the changes are.
 - A side panel lists every file with pending changes.
 
-> **Requires a Git repository.** The extension only runs when the open folder is a Git repo. It uses Git to know what files looked like before the agent touched them. In a multi-root workspace, every folder's repo is reviewed; folders that aren't in a Git repo are skipped.
+> **Requires a Git repository.** The extension only runs when the open folder is a Git repo. It uses Git to know what files looked like before the agent touched them. In a multi-root workspace, every folder's repo is reviewed; folders that aren't in a Git repo are skipped. Repos inside an open folder (nested repos, submodules) are found and reviewed on their own, up to 4 folders deep.
 
 ## Install
 

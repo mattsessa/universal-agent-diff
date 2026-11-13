@@ -10,6 +10,7 @@ Universal Agent Diff: an interactive diff view VS Code extension for reviewing A
 
 - Agent disk writes start a per-file review snapshot.
 - Multi-root workspaces: each folder's Git repo is reviewed; non-Git folders skipped; side panel shows the repo when several are open.
+- Nested repos (inside an open folder, even if the parent .gitignores them; submodules too) are found and reviewed on their own; new ones (git init / clone) picked up live.
 - Inline Accept / Reject on every change.
 - Added lines green; deleted lines shown as red blocks.
 - My edits join an open review; otherwise ignored.

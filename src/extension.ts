@@ -1,7 +1,7 @@
 import { execFile } from 'child_process';
 import { randomBytes } from 'crypto';
 import { diffArrays } from 'diff';
-import { readFile, rm, stat } from 'fs/promises';
+import { readdir, readFile, rm, stat } from 'fs/promises';
 import { tmpdir } from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
@@ -515,6 +515,57 @@ class ReviewState implements vscode.Disposable {
   dispose(): void {
     this._onDidChangeSnapshots.dispose();
   }
+}
+
+/** Top-level folder of the Git repo containing `dir`, or undefined if it isn't in one. */
+function repoRootOf(dir: string): Promise<string | undefined> {
+  return git(dir, ['rev-parse', '--show-toplevel']).then(
+    (out) => path.resolve(out.trim()),
+    () => undefined,
+  );
+}
+
+/** How deep (folders below a workspace folder) and how wide the nested-repo scan goes. */
+const NESTED_REPO_MAX_DEPTH = 4;
+const NESTED_REPO_MAX_FOLDERS = 5000;
+
+/**
+ * Git repos inside a folder, below it: any subfolder with a `.git` entry (a
+ * folder, or a file for submodules and worktrees). Finds repos the folder's
+ * own repo ignores or can't see into, e.g. a parent repo that .gitignores the
+ * repos inside it. Skips `node_modules` and hidden folders, doesn't follow
+ * symlinks, and stops after NESTED_REPO_MAX_DEPTH levels or
+ * NESTED_REPO_MAX_FOLDERS folders so huge trees stay fast.
+ */
+async function findNestedRepos(folder: string): Promise<string[]> {
+  const found: string[] = [];
+  let level = [folder];
+  let scanned = 0;
+  for (let depth = 0; depth <= NESTED_REPO_MAX_DEPTH && level.length > 0; depth++) {
+    level = level.slice(0, Math.max(0, NESTED_REPO_MAX_FOLDERS - scanned));
+    scanned += level.length;
+    const listings = await Promise.all(
+      level.map((dir) =>
+        readdir(dir, { withFileTypes: true }).then(
+          (entries) => ({ dir, entries }),
+          () => ({ dir, entries: [] }),
+        ),
+      ),
+    );
+    const next: string[] = [];
+    for (const { dir, entries } of listings) {
+      if (dir !== folder && entries.some((e) => e.name === '.git')) {
+        found.push(dir);
+      }
+      for (const e of entries) {
+        if (e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules') {
+          next.push(path.join(dir, e.name));
+        }
+      }
+    }
+    level = next;
+  }
+  return found;
 }
 
 function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Promise<string> {
@@ -1316,6 +1367,26 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   };
 
+  /**
+   * A repo may have appeared or gone away on disk (git init, clone, a repo
+   * folder deleted): if so, re-scan the workspace for repos. Created: a `.git`,
+   * or a folder containing one (a clone may only report the folder). Deleted:
+   * a `.git`, or a repo's folder.
+   */
+  const checkForRepoChange = async (uri: vscode.Uri, created: boolean) => {
+    const fsPath = uri.fsPath;
+    if (fsPath.split(path.sep).includes('node_modules')) {
+      return;
+    }
+    const changed =
+      path.basename(fsPath) === '.git' ||
+      (created ? await exists(path.join(fsPath, '.git')) : repos.get(fsPath) !== undefined);
+    if (changed) {
+      debug('a Git repo was added or removed on disk → re-scanning the workspace');
+      void syncRepos();
+    }
+  };
+
   /** Start reviewing a repo: record its startup state, then watch its files. */
   const addRepo = async (repoRoot: string) => {
     const state = new ReviewState(repoRoot, context.workspaceState, repos);
@@ -1336,8 +1407,14 @@ export async function activate(context: vscode.ExtensionContext) {
     repoDisposables.set(repoRoot, [
       watcher,
       watcher.onDidChange((uri) => onDiskChange(state, uri)),
-      watcher.onDidCreate((uri) => onDiskChange(state, uri)),
-      watcher.onDidDelete((uri) => onDiskDelete(state, uri)),
+      watcher.onDidCreate((uri) => {
+        void checkForRepoChange(uri, true);
+        void onDiskChange(state, uri);
+      }),
+      watcher.onDidDelete((uri) => {
+        void checkForRepoChange(uri, false);
+        void onDiskDelete(state, uri);
+      }),
       state.onDidChangeSnapshots(updatePanel),
       state.onDidChangeSnapshots(refreshDeletedViews),
       state,
@@ -1357,9 +1434,10 @@ export async function activate(context: vscode.ExtensionContext) {
   };
 
   /**
-   * Review the Git repo of every workspace folder (folders in the same repo
-   * share it; folders that aren't in a repo are skipped), and stop reviewing
-   * repos whose folders were removed. Runs one at a time.
+   * Review every Git repo in the workspace: each folder's own repo (folders in
+   * the same repo share it) plus repos nested inside the folder (see
+   * `findNestedRepos`). Folders with neither are skipped. Stops reviewing
+   * repos that are no longer there. Runs one at a time.
    */
   let syncing = Promise.resolve();
   const syncRepos = () =>
@@ -1369,19 +1447,25 @@ export async function activate(context: vscode.ExtensionContext) {
       );
       const roots = new Set<string>();
       for (const folder of folders) {
-        const root = await git(folder.uri.fsPath, ['rev-parse', '--show-toplevel']).then(
-          (out) => path.resolve(out.trim()),
-          () => undefined,
-        );
+        const root = await repoRootOf(folder.uri.fsPath);
         if (root) {
           roots.add(root);
-        } else {
-          debug(`folder "${folder.name}": not in a Git repo, not reviewed`);
+        }
+        let nested = 0;
+        for (const dir of await findNestedRepos(folder.uri.fsPath)) {
+          const nestedRoot = await repoRootOf(dir);
+          if (nestedRoot && nestedRoot !== root) {
+            roots.add(nestedRoot);
+            nested++;
+          }
+        }
+        if (!root && nested === 0) {
+          debug(`folder "${folder.name}": no Git repo in it, not reviewed`);
         }
       }
       for (const state of repos.all()) {
         if (!roots.has(state.repoRoot)) {
-          debug(`repo "${state.name}": folder removed, no longer reviewed`);
+          debug(`repo "${state.name}": no longer open, not reviewed`);
           removeRepo(state.repoRoot);
         }
       }

@@ -6,6 +6,8 @@
 
 - **Multi-root workspaces: every repo is reviewed now.** With several folders open in one window, only the first folder's repo was watched, and agent changes in the others went unreviewed. Each folder's Git repo is now reviewed on its own, including repos added to or removed from the workspace while it's open. When more than one repo is open, the side panel shows which repo each file is in. Folders that aren't in a Git repo are skipped instead of stopping the extension.
 
+- **Repos inside other repos are reviewed now.** Opening a folder that holds several repos (for example a parent repo that `.gitignore`s the repos inside it) used to skip every change in the inner repos. Repos inside an open folder are now found and reviewed on their own, including ones you `git init` or clone while the folder is open. Submodules are covered too.
+
 ## 1.1.0
 
 ### Fixed
