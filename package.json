@@ -2,7 +2,7 @@
   "name": "universal-agent-diff",
   "displayName": "Universal Agent Diff",
   "description": "Review any AI agent's file changes inline: accept or reject each change, including new and deleted files",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "publisher": "mattsessa",
   "license": "MIT",
   "repository": {
