@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.0
+
+### Fixed
+
+- **Multi-root workspaces: every repo is reviewed now.** With several folders open in one window, only the first folder's repo was watched, and agent changes in the others went unreviewed. Each folder's Git repo is now reviewed on its own, including repos added to or removed from the workspace while it's open. When more than one repo is open, the side panel shows which repo each file is in. Folders that aren't in a Git repo are skipped instead of stopping the extension.
+
 ## 1.1.0
 
 ### Fixed

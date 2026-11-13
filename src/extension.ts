@@ -114,6 +114,11 @@ function isEnvFile(rel: string): boolean {
   return name.endsWith('.env') || name.startsWith('.env.') || name === '.envrc';
 }
 
+/**
+ * Storage key prefix; each repo stores its pending reviews under
+ * `${STORAGE_KEY}:${repoRoot}`. Before multi-repo support (≤ 1.1.0) a single
+ * repo used `STORAGE_KEY` itself; that entry is migrated on first load.
+ */
 const STORAGE_KEY = 'interactiveDiff.snapshots';
 
 interface StoredSnapshots {
@@ -129,6 +134,82 @@ function exists(fsPath: string): Promise<boolean> {
     () => true,
     () => false,
   );
+}
+
+/**
+ * The Git repos being reviewed: one per workspace folder (folders inside the
+ * same repo share it). A file belongs to the deepest repo containing it, so a
+ * repo nested inside another (both open as folders) is reviewed on its own.
+ */
+class Repos {
+  private byRoot = new Map<string, ReviewState>();
+
+  all(): ReviewState[] {
+    return [...this.byRoot.values()];
+  }
+
+  get(repoRoot: string): ReviewState | undefined {
+    return this.byRoot.get(repoRoot);
+  }
+
+  add(state: ReviewState): void {
+    this.byRoot.set(state.repoRoot, state);
+  }
+
+  remove(repoRoot: string): void {
+    this.byRoot.delete(repoRoot);
+  }
+
+  /** Whether more than one repo is open (file names in the UI and log then include the repo). */
+  get multiple(): boolean {
+    return this.byRoot.size > 1;
+  }
+
+  /** The repo a path on disk belongs to: the deepest one containing it. */
+  ownerOf(fsPath: string): ReviewState | undefined {
+    let owner: ReviewState | undefined;
+    for (const state of this.byRoot.values()) {
+      const rel = path.relative(state.repoRoot, fsPath);
+      const inside = !rel.startsWith('..') && !path.isAbsolute(rel);
+      if (inside && (!owner || state.repoRoot.length > owner.repoRoot.length)) {
+        owner = state;
+      }
+    }
+    return owner;
+  }
+
+  /**
+   * The repo and repo-relative path of a file, or undefined if it isn't in a
+   * repo that's ready (a repo is still starting while it records its startup
+   * state; changes before that are part of the startup state).
+   */
+  fileOf(uri: vscode.Uri): PendingFile | undefined {
+    const state = uri.scheme === 'file' ? this.ownerOf(uri.fsPath) : undefined;
+    const rel = state?.ready ? state.relPathOf(uri) : undefined;
+    return state && rel !== undefined ? { state, rel } : undefined;
+  }
+
+  /** Every file with pending changes, ordered by repo, then path. */
+  pendingFiles(): PendingFile[] {
+    return this.all()
+      .flatMap((state) => state.pendingFiles().map((rel) => ({ state, rel })))
+      .sort(compareFiles);
+  }
+}
+
+/** A file in a specific repo. */
+interface PendingFile {
+  state: ReviewState;
+  rel: string;
+}
+
+const sameFile = (a: PendingFile | undefined, b: PendingFile | undefined) =>
+  !!a && !!b && a.state === b.state && a.rel === b.rel;
+
+/** Order files by repo, then by path. */
+function compareFiles(a: PendingFile, b: PendingFile): number {
+  const byRepo = a.state.repoRoot.localeCompare(b.state.repoRoot);
+  return byRepo !== 0 ? byRepo : a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0;
 }
 
 /**
@@ -159,10 +240,27 @@ class ReviewState implements vscode.Disposable {
   /** Fires when a snapshot is created, updated, or deleted. */
   readonly onDidChangeSnapshots = this._onDidChangeSnapshots.event;
 
+  private readonly storageKey: string;
+  /** Set once `init` has recorded the startup state; until then changes aren't reviewed. */
+  ready = false;
+
   constructor(
     readonly repoRoot: string,
     private storage: vscode.Memento,
-  ) {}
+    private repos: Repos,
+  ) {
+    this.storageKey = `${STORAGE_KEY}:${repoRoot}`;
+  }
+
+  /** The repo's folder name. */
+  get name(): string {
+    return path.basename(this.repoRoot);
+  }
+
+  /** How a file is named in the side panel and log: repo-relative, prefixed with the repo when several are open. */
+  label(rel: string): string {
+    return this.repos.multiple ? `${this.name}/${rel}` : rel;
+  }
 
   /** Record the working tree as it is at startup, and restore saved snapshots. */
   async init(): Promise<void> {
@@ -194,8 +292,11 @@ class ReviewState implements vscode.Disposable {
 
     // Restore saved snapshots for this repo, dropping any that no longer apply
     // (file deleted, now .gitignored, or it already matches its snapshot).
-    const stored = this.storage.get<StoredSnapshots>(STORAGE_KEY);
-    if (stored?.repoRoot === this.repoRoot) {
+    const legacy = this.storage.get<StoredSnapshots>(STORAGE_KEY);
+    const migrate = legacy !== undefined && path.resolve(legacy.repoRoot) === this.repoRoot;
+    const stored =
+      this.storage.get<StoredSnapshots>(this.storageKey) ?? (migrate ? legacy : undefined);
+    if (stored && path.resolve(stored.repoRoot) === this.repoRoot) {
       const deleted = new Set(stored.deleted ?? []);
       for (const [rel, snapshot] of Object.entries(stored.files)) {
         if (!(await this.isReviewed(rel))) {
@@ -213,9 +314,13 @@ class ReviewState implements vscode.Disposable {
       }
     }
     debug(
-      `init: startup tree has ${this.startPaths.size} files; restored ${this.snapshots.size} pending review(s)`,
+      `init "${this.name}": startup tree has ${this.startPaths.size} files; restored ${this.snapshots.size} pending review(s)`,
     );
     await this.persist();
+    if (migrate) {
+      await this.storage.update(STORAGE_KEY, undefined);
+    }
+    this.ready = true;
   }
 
   getSnapshot(rel: string): string | undefined {
@@ -228,7 +333,7 @@ class ReviewState implements vscode.Disposable {
   }
 
   setSnapshot(rel: string, text: string): void {
-    debug(`${rel}: review ${this.snapshots.has(rel) ? 'updated' : 'started'}`);
+    debug(`${this.label(rel)}: review ${this.snapshots.has(rel) ? 'updated' : 'started'}`);
     this.snapshots.set(rel, text);
     this.deleted.delete(rel);
     void this.persist();
@@ -238,7 +343,7 @@ class ReviewState implements vscode.Disposable {
   deleteSnapshot(rel: string): void {
     this.deleted.delete(rel);
     if (this.snapshots.delete(rel)) {
-      debug(`${rel}: review cleared`);
+      debug(`${this.label(rel)}: review cleared`);
       void this.persist();
       this._onDidChangeSnapshots.fire();
     }
@@ -251,7 +356,7 @@ class ReviewState implements vscode.Disposable {
 
   /** Record that the agent deleted a file whose content was `before`. */
   markDeleted(rel: string, before: string): void {
-    debug(`${rel}: deletion review started`);
+    debug(`${this.label(rel)}: deletion review started`);
     this.snapshots.set(rel, before);
     this.deleted.add(rel);
     void this.persist();
@@ -294,9 +399,12 @@ class ReviewState implements vscode.Disposable {
     return this.relPathOf(doc.uri);
   }
 
-  /** Repo-relative path for a URI, or undefined if it isn't a file in the repo. */
+  /**
+   * Repo-relative path for a URI, or undefined if it isn't a file in this repo
+   * (including files in a repo nested inside this one).
+   */
   relPathOf(uri: vscode.Uri): string | undefined {
-    if (uri.scheme !== 'file') {
+    if (uri.scheme !== 'file' || this.repos.ownerOf(uri.fsPath) !== this) {
       return undefined;
     }
     const rel = path.relative(this.repoRoot, uri.fsPath);
@@ -339,7 +447,7 @@ class ReviewState implements vscode.Disposable {
             files: Object.fromEntries(this.snapshots),
             deleted: [...this.deleted],
           };
-    return this.storage.update(STORAGE_KEY, value);
+    return this.storage.update(this.storageKey, value);
   }
 
   /**
@@ -426,6 +534,7 @@ function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Promise<stri
 // ─── Overlay ─────────────────────────────────────────────────────────────────
 
 interface FileReview {
+  state: ReviewState;
   rel: string;
   snapshot: string;
   hunks: Hunk[];
@@ -525,16 +634,20 @@ class ReviewOverlay implements vscode.CodeLensProvider, vscode.Disposable {
    */
   private rowCache = new WeakMap<vscode.TextEditor, Map<string, number>>();
 
-  constructor(private state: ReviewState) {}
+  constructor(private repos: Repos) {}
 
   /** Pending changes for a document, or undefined if it has no snapshot. */
   review(doc: vscode.TextDocument): FileReview | undefined {
-    const rel = this.state.relPath(doc);
-    const snapshot = rel === undefined ? undefined : this.state.getSnapshot(rel);
-    if (rel === undefined || snapshot === undefined || this.state.isDeleted(rel)) {
+    const file = this.repos.fileOf(doc.uri);
+    if (!file) {
       return undefined;
     }
-    return { rel, snapshot, hunks: computeHunks(snapshot, doc.getText()) };
+    const { state, rel } = file;
+    const snapshot = state.getSnapshot(rel);
+    if (snapshot === undefined || state.isDeleted(rel)) {
+      return undefined;
+    }
+    return { state, rel, snapshot, hunks: computeHunks(snapshot, doc.getText()) };
   }
 
   refresh(): void {
@@ -705,31 +818,33 @@ class ReviewOverlay implements vscode.CodeLensProvider, vscode.Disposable {
 // ─── Side panel ──────────────────────────────────────────────────────────────
 
 /** Lists files with pending changes. Clicking one opens it at its first change. */
-class PendingFilesProvider implements vscode.TreeDataProvider<string>, vscode.Disposable {
+class PendingFilesProvider implements vscode.TreeDataProvider<PendingFile>, vscode.Disposable {
   private _onDidChangeTreeData = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
-  constructor(private state: ReviewState) {}
+  constructor(private repos: Repos) {}
 
   refresh(): void {
     this._onDidChangeTreeData.fire();
   }
 
-  getChildren(element?: string): string[] {
-    return element ? [] : this.state.pendingFiles();
+  getChildren(element?: PendingFile): PendingFile[] {
+    return element ? [] : this.repos.pendingFiles();
   }
 
-  getTreeItem(rel: string): vscode.TreeItem {
-    const item = new vscode.TreeItem(this.state.uri(rel));
-    const dir = path.posix.dirname(rel);
-    const deleted = this.state.isDeleted(rel);
+  getTreeItem(file: PendingFile): vscode.TreeItem {
+    const { state, rel } = file;
+    const item = new vscode.TreeItem(state.uri(rel));
+    const label = state.label(rel);
+    const dir = path.posix.dirname(label);
+    const deleted = state.isDeleted(rel);
     item.description = [deleted ? 'deleted' : '', dir === '.' ? '' : dir]
       .filter(Boolean)
       .join(' · ');
     if (deleted) {
-      item.tooltip = `${rel} (deleted by the agent)`;
+      item.tooltip = `${label} (deleted by the agent)`;
     }
-    item.command = { command: 'interactiveDiff.openPending', title: 'Open', arguments: [rel] };
+    item.command = { command: 'interactiveDiff.openPending', title: 'Open', arguments: [file] };
     return item;
   }
 
@@ -740,16 +855,29 @@ class PendingFilesProvider implements vscode.TreeDataProvider<string>, vscode.Di
 
 // ─── Deleted files ───────────────────────────────────────────────────────────
 
-/** Scheme for read-only views of deleted files: `?old` = content before, `?empty` = nothing. */
+/**
+ * Scheme for read-only views of deleted files. The path is the repo-relative
+ * file; the query holds `side` (`old` = content before, `empty` = nothing)
+ * and `repo` (the repo root).
+ */
 const DELETED_SCHEME = 'interactive-diff-deleted';
 
-function deletedUri(rel: string, side: 'old' | 'empty'): vscode.Uri {
-  return vscode.Uri.from({ scheme: DELETED_SCHEME, path: '/' + rel, query: side });
+function deletedUri(file: PendingFile, side: 'old' | 'empty'): vscode.Uri {
+  const query = new URLSearchParams({ side, repo: file.state.repoRoot }).toString();
+  return vscode.Uri.from({ scheme: DELETED_SCHEME, path: '/' + file.rel, query });
 }
 
-/** Repo-relative path shown by a deleted-file view URI, or undefined for other URIs. */
-function relOfDeletedUri(uri: vscode.Uri | undefined): string | undefined {
-  return uri?.scheme === DELETED_SCHEME ? uri.path.slice(1) : undefined;
+/** The file shown by a deleted-file view URI, or undefined for other URIs. */
+function deletedFileOf(
+  repos: Repos,
+  uri: vscode.Uri | undefined,
+): (PendingFile & { side: string }) | undefined {
+  if (uri?.scheme !== DELETED_SCHEME) {
+    return undefined;
+  }
+  const query = new URLSearchParams(uri.query);
+  const state = repos.get(query.get('repo') ?? '');
+  return state ? { state, rel: uri.path.slice(1), side: query.get('side') ?? '' } : undefined;
 }
 
 // ─── Activation ──────────────────────────────────────────────────────────────
@@ -757,21 +885,12 @@ function relOfDeletedUri(uri: vscode.Uri | undefined): string | undefined {
 export async function activate(context: vscode.ExtensionContext) {
   log = vscode.window.createOutputChannel('Universal Agent Diff', { log: true });
   context.subscriptions.push(log);
-  const folders = vscode.workspace.workspaceFolders ?? [];
-  const folder = folders[0];
-  if (!folder) {
-    debug('activate: no workspace folder, not running');
-    return;
-  }
-  const repoRoot = (await git(folder.uri.fsPath, ['rev-parse', '--show-toplevel'])).trim();
-  debug(
-    `activate: repo "${path.basename(repoRoot)}"; ${folders.length} workspace folder(s)` +
-      (folders.length > 1 ? ' (only the first is watched)' : ''),
-  );
-  const state = new ReviewState(repoRoot, context.workspaceState);
-  await state.init();
-  const overlay = new ReviewOverlay(state);
-  const pending = new PendingFilesProvider(state);
+
+  const repos = new Repos();
+  /** Each repo's watcher and listeners, disposed when the repo is no longer open. */
+  const repoDisposables = new Map<string, vscode.Disposable[]>();
+  const overlay = new ReviewOverlay(repos);
+  const pending = new PendingFilesProvider(repos);
   const panel = vscode.window.createTreeView('interactiveDiff.pending', {
     treeDataProvider: pending,
   });
@@ -779,7 +898,7 @@ export async function activate(context: vscode.ExtensionContext) {
   /** Refresh the side panel list and its badge (number of pending files). */
   const updatePanel = () => {
     pending.refresh();
-    const count = state.pendingFiles().length;
+    const count = repos.pendingFiles().length;
     panel.badge =
       count > 0
         ? { value: count, tooltip: `${count} file${count === 1 ? '' : 's'} pending review` }
@@ -791,9 +910,9 @@ export async function activate(context: vscode.ExtensionContext) {
   const clearIfDone = (doc: vscode.TextDocument) => {
     const review = overlay.review(doc);
     if (review && review.hunks.length === 0) {
-      state.deleteSnapshot(review.rel);
+      review.state.deleteSnapshot(review.rel);
       if (!doc.isDirty) {
-        state.lastSeen.set(review.rel, doc.getText());
+        review.state.lastSeen.set(review.rel, doc.getText());
       }
     }
   };
@@ -803,21 +922,24 @@ export async function activate(context: vscode.ExtensionContext) {
    * something outside VS Code (an agent) changed it: start a snapshot.
    */
   const onOpen = async (doc: vscode.TextDocument) => {
-    const rel = state.relPath(doc);
-    if (rel === undefined || doc.isDirty || state.getSnapshot(rel) !== undefined) {
-      if (rel !== undefined) {
-        debug(`${rel}: opened, skipped (${doc.isDirty ? 'unsaved edits' : 'review already open'})`);
-      }
+    const file = repos.fileOf(doc.uri);
+    if (!file) {
+      return;
+    }
+    const { state, rel } = file;
+    const name = state.label(rel);
+    if (doc.isDirty || state.getSnapshot(rel) !== undefined) {
+      debug(`${name}: opened, skipped (${doc.isDirty ? 'unsaved edits' : 'review already open'})`);
       return;
     }
     const known = await state.knownContent(rel);
     if (known === undefined) {
-      debug(`${rel}: opened, not reviewed (.gitignored, .git or node_modules)`);
+      debug(`${name}: opened, not reviewed (.gitignored, .git or node_modules)`);
       return;
     }
     const text = doc.getText();
     if (text !== known) {
-      debug(`${rel}: opened, differs from last known content → agent change`);
+      debug(`${name}: opened, differs from last known content → agent change`);
       state.setSnapshot(rel, known);
     }
     state.lastSeen.set(rel, text);
@@ -837,12 +959,14 @@ export async function activate(context: vscode.ExtensionContext) {
    */
   const onChange = async (e: vscode.TextDocumentChangeEvent) => {
     const doc = e.document;
-    const rel = state.relPath(doc);
-    if (rel === undefined || e.contentChanges.length === 0) {
+    const file = repos.fileOf(doc.uri);
+    if (!file || e.contentChanges.length === 0) {
       return;
     }
+    const { state, rel } = file;
+    const name = state.label(rel);
     if (!(await state.isReviewed(rel))) {
-      debug(`${rel}: edited, not reviewed (.gitignored, .git or node_modules)`);
+      debug(`${name}: edited, not reviewed (.gitignored, .git or node_modules)`);
       return;
     }
     const text = doc.getText();
@@ -862,11 +986,11 @@ export async function activate(context: vscode.ExtensionContext) {
       `visible=${vscode.window.visibleTextEditors.some((ed) => ed.document === doc)}, ${diskInfo}`;
     if (fromDisk && (await state.matchesGit(rel, text))) {
       // Source control restored the file: not an agent; discard any review.
-      debug(`${rel}: edited (${info}) → reloaded from disk, matches git → source control`);
+      debug(`${name}: edited (${info}) → reloaded from disk, matches git → source control`);
       state.deleteSnapshot(rel);
       state.lastSeen.set(rel, text);
     } else if (fromDisk) {
-      debug(`${rel}: edited (${info}) → reloaded from disk → agent change`);
+      debug(`${name}: edited (${info}) → reloaded from disk → agent change`);
       if (state.getSnapshot(rel) === undefined) {
         const before = state.lastSeen.get(rel) ?? (await state.knownContent(rel));
         if (before !== undefined && before !== text) {
@@ -876,7 +1000,7 @@ export async function activate(context: vscode.ExtensionContext) {
       state.lastSeen.set(rel, text);
     } else {
       debug(
-        `${rel}: edited (${info}) → treated as my edit` +
+        `${name}: edited (${info}) → treated as my edit` +
           (state.getSnapshot(rel) === undefined
             ? ', no open review → ignored'
             : ', joins open review'),
@@ -887,37 +1011,39 @@ export async function activate(context: vscode.ExtensionContext) {
   };
 
   /**
-   * A file changed or was created on disk. Files open in VS Code are handled
-   * by `onChange` (VS Code reloads them); this covers files that aren't open.
-   * If the file differs from its last known content and has no snapshot yet,
-   * that content becomes the snapshot, so it shows up as pending right away.
+   * A file in `state`'s repo changed or was created on disk. Files open in VS
+   * Code are handled by `onChange` (VS Code reloads them); this covers files
+   * that aren't open. If the file differs from its last known content and has
+   * no snapshot yet, that content becomes the snapshot, so it shows up as
+   * pending right away.
    */
-  const onDiskChange = async (uri: vscode.Uri) => {
+  const onDiskChange = async (state: ReviewState, uri: vscode.Uri) => {
     const rel = state.relPathOf(uri);
     if (rel === undefined || isInternalPath(rel)) {
       return;
     }
+    const name = state.label(rel);
     state.clearDeleted(rel);
     if (path.basename(uri.fsPath) === '.gitignore') {
       await state.recheckIgnored();
       overlay.refresh();
     }
     if (!(await state.isReviewed(rel))) {
-      debug(`${rel}: changed on disk, not reviewed (.gitignored, .git or node_modules)`);
+      debug(`${name}: changed on disk, not reviewed (.gitignored, .git or node_modules)`);
       return;
     }
     if (vscode.workspace.textDocuments.some((d) => d.uri.fsPath === uri.fsPath)) {
-      debug(`${rel}: changed on disk, open in VS Code → left to the editor change handler`);
+      debug(`${name}: changed on disk, open in VS Code → left to the editor change handler`);
       return;
     }
     const current = await readFile(uri.fsPath, 'utf8').catch(() => null);
     if (current === null || current.includes('\0')) {
-      debug(`${rel}: changed on disk, skipped (folder, unreadable or binary)`);
+      debug(`${name}: changed on disk, skipped (folder, unreadable or binary)`);
       return;
     }
     if (await state.matchesGit(rel, current)) {
       // Source control restored the file: not an agent; discard any review.
-      debug(`${rel}: changed on disk, matches git → source control`);
+      debug(`${name}: changed on disk, matches git → source control`);
       state.deleteSnapshot(rel);
       state.lastSeen.set(rel, current);
       return;
@@ -929,10 +1055,10 @@ export async function activate(context: vscode.ExtensionContext) {
         return; // .gitignored
       }
       if (before !== current) {
-        debug(`${rel}: changed on disk → agent change`);
+        debug(`${name}: changed on disk → agent change`);
         state.setSnapshot(rel, before);
       } else {
-        debug(`${rel}: changed on disk, same as last known content → nothing to review`);
+        debug(`${name}: changed on disk, same as last known content → nothing to review`);
       }
     } else if (snapshot === current) {
       state.deleteSnapshot(rel);
@@ -946,12 +1072,13 @@ export async function activate(context: vscode.ExtensionContext) {
     [...ownDeletes].some((p) => fsPath === p || fsPath.startsWith(p + path.sep));
 
   /**
-   * A file or folder was deleted on disk. Deletions by an agent become a
-   * review (restorable with Reject) for each file whose previous content is
-   * known. Deletions made in VS Code, by source control, of files the agent
-   * just created (nothing to restore), or of unreviewed files are dropped.
+   * A file or folder in `state`'s repo was deleted on disk. Deletions by an
+   * agent become a review (restorable with Reject) for each file whose
+   * previous content is known. Deletions made in VS Code, by source control,
+   * of files the agent just created (nothing to restore), or of unreviewed
+   * files are dropped.
    */
-  const onDiskDelete = async (uri: vscode.Uri) => {
+  const onDiskDelete = async (state: ReviewState, uri: vscode.Uri) => {
     const rel = state.relPathOf(uri);
     if (rel === undefined || isInternalPath(rel)) {
       return;
@@ -961,7 +1088,7 @@ export async function activate(context: vscode.ExtensionContext) {
     }
     const own = isOwnDelete(uri.fsPath);
     // A deleted folder may only report itself: also check the files under it.
-    const tracked = await git(repoRoot, ['ls-files', '-z', '--', rel]).then(
+    const tracked = await git(state.repoRoot, ['ls-files', '-z', '--', rel]).then(
       (out) => out.split('\0').filter(Boolean),
       () => [],
     );
@@ -978,7 +1105,7 @@ export async function activate(context: vscode.ExtensionContext) {
       const unseen = state.getSnapshot(r) === undefined && !state.lastSeen.has(r);
       if (!(agent && !before && unseen)) {
         debug(
-          `${r}: deleted → ` +
+          `${state.label(r)}: deleted → ` +
             (own
               ? 'by VS Code itself, ignored'
               : !reviewed
@@ -1001,17 +1128,17 @@ export async function activate(context: vscode.ExtensionContext) {
   };
 
   /** Show a deleted file's old content (all red) in a read-only diff. */
-  const showDeleted = (rel: string) =>
+  const showDeleted = (file: PendingFile) =>
     vscode.commands.executeCommand(
       'vscode.diff',
-      deletedUri(rel, 'old'),
-      deletedUri(rel, 'empty'),
-      `${path.posix.basename(rel)} (deleted)`,
+      deletedUri(file, 'old'),
+      deletedUri(file, 'empty'),
+      `${path.posix.basename(file.rel)} (deleted)`,
       { preview: false },
     );
 
   /** Close any open views of a deleted file. */
-  const closeDeletedViews = async (rel: string) => {
+  const closeDeletedViews = async (file: PendingFile) => {
     const tabs = vscode.window.tabGroups.all
       .flatMap((g) => g.tabs)
       .filter((t) => {
@@ -1022,35 +1149,44 @@ export async function activate(context: vscode.ExtensionContext) {
             : input instanceof vscode.TabInputText
               ? input.uri
               : undefined;
-        return relOfDeletedUri(uri) === rel;
+        return sameFile(deletedFileOf(repos, uri), file);
       });
     await vscode.window.tabGroups.close(tabs);
   };
 
   /** Accept (keep deleted) or Reject (restore) a deletion from its view, then move on. */
   const resolveDeleted = async (keep: boolean, uri?: vscode.Uri) => {
-    const rel = relOfDeletedUri(uri ?? vscode.window.activeTextEditor?.document.uri);
-    if (rel === undefined || !state.isDeleted(rel)) {
+    const file = deletedFileOf(repos, uri ?? vscode.window.activeTextEditor?.document.uri);
+    if (!file || !file.state.isDeleted(file.rel)) {
       return;
     }
-    await (keep ? acceptFile(rel) : rejectFile(rel));
-    await closeDeletedViews(rel);
-    if (state.pendingFiles().length > 0) {
+    await (keep ? acceptFile(file) : rejectFile(file));
+    await closeDeletedViews(file);
+    if (repos.pendingFiles().length > 0) {
       await goToChange(1);
     }
   };
 
   const deletedContent = new vscode.EventEmitter<vscode.Uri>();
 
-  /** Open document for a repo-relative path, if VS Code has it loaded. */
-  const openDoc = (rel: string) => {
+  /** Tell open deleted-file views to re-read their content. */
+  const refreshDeletedViews = () => {
+    for (const doc of vscode.workspace.textDocuments) {
+      if (doc.uri.scheme === DELETED_SCHEME) {
+        deletedContent.fire(doc.uri);
+      }
+    }
+  };
+
+  /** Open document for a file, if VS Code has it loaded. */
+  const openDoc = ({ state, rel }: PendingFile) => {
     const fsPath = state.uri(rel).fsPath;
     return vscode.workspace.textDocuments.find((d) => d.uri.fsPath === fsPath);
   };
 
   /** Accept every pending change in a file: keep it as is and clear its review. */
-  const acceptFile = async (rel: string) => {
-    debug(`${rel}: accept all`);
+  const acceptFile = async ({ state, rel }: PendingFile) => {
+    debug(`${state.label(rel)}: accept all`);
     state.deleteSnapshot(rel);
     const disk = await readFile(state.uri(rel).fsPath, 'utf8').catch(() => null);
     if (disk !== null) {
@@ -1064,14 +1200,15 @@ export async function activate(context: vscode.ExtensionContext) {
    * A file the agent created (empty snapshot) is deleted instead. Open files
    * are restored with a normal editor edit, so Cmd+Z undoes it.
    */
-  const rejectFile = async (rel: string) => {
+  const rejectFile = async (file: PendingFile) => {
+    const { state, rel } = file;
     const snapshot = state.getSnapshot(rel);
     if (snapshot === undefined) {
       return;
     }
-    debug(`${rel}: reject all`);
+    debug(`${state.label(rel)}: reject all`);
     const uri = state.uri(rel);
-    const doc = openDoc(rel);
+    const doc = openDoc(file);
     const wasDeleted = state.isDeleted(rel);
     // Clear the review first so our own write isn't seen as an agent change.
     state.deleteSnapshot(rel);
@@ -1093,10 +1230,6 @@ export async function activate(context: vscode.ExtensionContext) {
     }
     overlay.refresh();
   };
-
-  const watcher = vscode.workspace.createFileSystemWatcher(
-    new vscode.RelativePattern(repoRoot, '**/*'),
-  );
 
   /** Re-diff the document and return the clicked hunk only if it still exists unchanged. */
   const findHunk = async (uri: vscode.Uri, clicked: Hunk) => {
@@ -1121,12 +1254,12 @@ export async function activate(context: vscode.ExtensionContext) {
   };
 
   /** Open a pending file at its first change. */
-  const openPending = async (rel: string, atLast = false) => {
-    if (state.isDeleted(rel)) {
-      await showDeleted(rel);
+  const openPending = async (file: PendingFile, atLast = false) => {
+    if (file.state.isDeleted(file.rel)) {
+      await showDeleted(file);
       return;
     }
-    const uri = state.uri(rel);
+    const uri = file.state.uri(file.rel);
     const doc = await vscode.workspace.openTextDocument(uri);
     const hunks = overlay.review(doc)?.hunks ?? [];
     const target = atLast ? hunks[hunks.length - 1] : hunks[0];
@@ -1136,7 +1269,8 @@ export async function activate(context: vscode.ExtensionContext) {
   /**
    * Go to the next (or previous) pending change from the cursor. Stays in the
    * current file until it has none left, wrapping around within it. When the
-   * file has no pending changes, open the next (or previous) pending file.
+   * file has no pending changes, open the next (or previous) pending file,
+   * across all repos.
    */
   const goToChange = async (direction: 1 | -1) => {
     const editor = vscode.window.activeTextEditor;
@@ -1151,18 +1285,17 @@ export async function activate(context: vscode.ExtensionContext) {
       await showLine(editor.document.uri, target);
       return;
     }
-    const files = state.pendingFiles();
+    const files = repos.pendingFiles();
     if (files.length === 0) {
       vscode.window.showInformationMessage('Universal Agent Diff: no pending changes.');
       return;
     }
-    const current = editor
-      ? (state.relPath(editor.document) ?? relOfDeletedUri(editor.document.uri))
-      : undefined;
+    const uri = editor?.document.uri;
+    const current = uri && (repos.fileOf(uri) ?? deletedFileOf(repos, uri));
     if (direction === 1) {
-      await openPending(files.find((f) => current === undefined || f > current) ?? files[0]);
+      await openPending(files.find((f) => !current || compareFiles(f, current) > 0) ?? files[0]);
     } else {
-      const prev = [...files].reverse().find((f) => current === undefined || f < current);
+      const prev = [...files].reverse().find((f) => !current || compareFiles(f, current) < 0);
       await openPending(prev ?? files[files.length - 1], true);
     }
   };
@@ -1178,20 +1311,102 @@ export async function activate(context: vscode.ExtensionContext) {
     if (hunks.length > 0) {
       const next = hunks.find((h) => h.newStart >= boundary) ?? hunks[0];
       await showLine(doc.uri, hunkLine(doc, next));
-    } else if (state.pendingFiles().length > 0) {
+    } else if (repos.pendingFiles().length > 0) {
       await goToChange(1);
     }
   };
 
+  /** Start reviewing a repo: record its startup state, then watch its files. */
+  const addRepo = async (repoRoot: string) => {
+    const state = new ReviewState(repoRoot, context.workspaceState, repos);
+    repos.add(state);
+    try {
+      await state.init();
+    } catch (err) {
+      debug(
+        `repo "${state.name}": couldn't start (${(err as Error).message.trim()}), not reviewed`,
+      );
+      repos.remove(repoRoot);
+      state.dispose();
+      return;
+    }
+    const watcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(repoRoot, '**/*'),
+    );
+    repoDisposables.set(repoRoot, [
+      watcher,
+      watcher.onDidChange((uri) => onDiskChange(state, uri)),
+      watcher.onDidCreate((uri) => onDiskChange(state, uri)),
+      watcher.onDidDelete((uri) => onDiskDelete(state, uri)),
+      state.onDidChangeSnapshots(updatePanel),
+      state.onDidChangeSnapshots(refreshDeletedViews),
+      state,
+    ]);
+    for (const doc of vscode.workspace.textDocuments) {
+      if (repos.fileOf(doc.uri)?.state === state) {
+        await onOpen(doc);
+      }
+    }
+  };
+
+  /** Stop reviewing a repo whose folder was removed. Its pending reviews stay saved. */
+  const removeRepo = (repoRoot: string) => {
+    repoDisposables.get(repoRoot)?.forEach((d) => d.dispose());
+    repoDisposables.delete(repoRoot);
+    repos.remove(repoRoot);
+  };
+
+  /**
+   * Review the Git repo of every workspace folder (folders in the same repo
+   * share it; folders that aren't in a repo are skipped), and stop reviewing
+   * repos whose folders were removed. Runs one at a time.
+   */
+  let syncing = Promise.resolve();
+  const syncRepos = () =>
+    (syncing = syncing.then(async () => {
+      const folders = (vscode.workspace.workspaceFolders ?? []).filter(
+        (f) => f.uri.scheme === 'file',
+      );
+      const roots = new Set<string>();
+      for (const folder of folders) {
+        const root = await git(folder.uri.fsPath, ['rev-parse', '--show-toplevel']).then(
+          (out) => path.resolve(out.trim()),
+          () => undefined,
+        );
+        if (root) {
+          roots.add(root);
+        } else {
+          debug(`folder "${folder.name}": not in a Git repo, not reviewed`);
+        }
+      }
+      for (const state of repos.all()) {
+        if (!roots.has(state.repoRoot)) {
+          debug(`repo "${state.name}": folder removed, no longer reviewed`);
+          removeRepo(state.repoRoot);
+        }
+      }
+      for (const root of roots) {
+        if (!repos.get(root)) {
+          await addRepo(root);
+        }
+      }
+      debug(
+        `reviewing ${repos.all().length} repo(s) from ${folders.length} workspace folder(s): ` +
+          repos
+            .all()
+            .map((s) => `"${s.name}"`)
+            .join(', '),
+      );
+      updatePanel();
+      overlay.refresh();
+    }));
+
   context.subscriptions.push(
-    state,
     overlay,
     pending,
     panel,
-    watcher,
-    watcher.onDidChange(onDiskChange),
-    watcher.onDidCreate(onDiskChange),
-    watcher.onDidDelete(onDiskDelete),
+    { dispose: () => [...repoDisposables.keys()].forEach(removeRepo) },
+    vscode.workspace.onDidChangeWorkspaceFolders(() => void syncRepos()),
     vscode.workspace.onWillDeleteFiles((e) => {
       for (const f of e.files) {
         ownDeletes.add(f.fsPath);
@@ -1202,16 +1417,9 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.workspace.registerTextDocumentContentProvider(DELETED_SCHEME, {
       onDidChange: deletedContent.event,
       provideTextDocumentContent: (uri) => {
-        const rel = relOfDeletedUri(uri);
-        return uri.query === 'old' && rel !== undefined ? (state.getSnapshot(rel) ?? '') : '';
+        const file = deletedFileOf(repos, uri);
+        return file?.side === 'old' ? (file.state.getSnapshot(file.rel) ?? '') : '';
       },
-    }),
-    state.onDidChangeSnapshots(() => {
-      for (const doc of vscode.workspace.textDocuments) {
-        if (doc.uri.scheme === DELETED_SCHEME) {
-          deletedContent.fire(doc.uri);
-        }
-      }
     }),
     vscode.commands.registerCommand('interactiveDiff.acceptDeletion', (uri?: vscode.Uri) =>
       resolveDeleted(true, uri),
@@ -1219,16 +1427,16 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('interactiveDiff.restoreFile', (uri?: vscode.Uri) =>
       resolveDeleted(false, uri),
     ),
-    state.onDidChangeSnapshots(updatePanel),
     vscode.languages.registerCodeLensProvider({ scheme: 'file' }, overlay),
     vscode.window.onDidChangeVisibleTextEditors(() => overlay.refresh()),
     vscode.workspace.onDidOpenTextDocument(onOpen),
     vscode.workspace.onDidChangeTextDocument(onChange),
     vscode.workspace.onDidSaveTextDocument((doc) => {
-      const rel = state.relPath(doc);
-      if (rel !== undefined) {
+      const file = repos.fileOf(doc.uri);
+      if (file) {
+        const { state, rel } = file;
         debug(
-          `${rel}: saved in VS Code → recorded as last seen` +
+          `${state.label(rel)}: saved in VS Code → recorded as last seen` +
             (state.getSnapshot(rel) === undefined ? ' (no open review)' : ''),
         );
         state.lastSeen.set(rel, doc.getText());
@@ -1247,8 +1455,8 @@ export async function activate(context: vscode.ExtensionContext) {
         const found = await findHunk(uri, clicked);
         if (found) {
           const { doc, review, hunk } = found;
-          debug(`${review.rel}: accept change at line ${hunk.newStart + 1}`);
-          state.setSnapshot(review.rel, applyHunk(review.snapshot, hunk));
+          debug(`${review.state.label(review.rel)}: accept change at line ${hunk.newStart + 1}`);
+          review.state.setSnapshot(review.rel, applyHunk(review.snapshot, hunk));
           clearIfDone(doc);
           overlay.refresh();
           await jumpToNext(doc, hunk.newStart + hunk.newLines.length);
@@ -1264,7 +1472,7 @@ export async function activate(context: vscode.ExtensionContext) {
         const found = await findHunk(uri, clicked);
         if (found) {
           const { doc, review, hunk } = found;
-          debug(`${review.rel}: reject change at line ${hunk.newStart + 1}`);
+          debug(`${review.state.label(review.rel)}: reject change at line ${hunk.newStart + 1}`);
           const [start, end] = newRangeOffsets(doc.getText(), hunk);
           const edit = new vscode.WorkspaceEdit();
           edit.replace(
@@ -1289,8 +1497,8 @@ export async function activate(context: vscode.ExtensionContext) {
       async (uri: vscode.Uri, clicked: Hunk) => {
         const found = await findHunk(uri, clicked);
         if (found?.review.snapshot === '') {
-          await rejectFile(found.review.rel);
-          if (state.pendingFiles().length > 0) {
+          await rejectFile(found.review);
+          if (repos.pendingFiles().length > 0) {
             await goToChange(1);
           }
           return;
@@ -1300,10 +1508,7 @@ export async function activate(context: vscode.ExtensionContext) {
     ),
   );
 
-  for (const doc of vscode.workspace.textDocuments) {
-    await onOpen(doc);
-  }
-  overlay.refresh();
+  await syncRepos();
 }
 
 export function deactivate() {}

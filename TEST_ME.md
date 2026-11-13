@@ -88,4 +88,5 @@ Agent: in `.env.sandbox` next to this file, change `sandbox` to `staging`.
 - Side panel: the Universal Agent Diff icon lists every file with pending changes. Hover a file for Accept all / Reject all.
 - Command Palette: Next Pending Change / Previous Pending Change.
 - Restart VS Code with a change pending: it's still there.
+- Multi-root workspace: File → Add Folder to Workspace… with a second Git repo, then have your agent change a file in each repo. Both show up in the side panel, labeled with their repo.
 - Debug log: Command Palette → Developer: Set Log Level… → Universal Agent Diff → Debug, then rerun any test and open Output → Universal Agent Diff. Each change is logged with its file path and what the extension decided, never file contents.
