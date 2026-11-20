@@ -65,7 +65,7 @@ Command Palette → **Preferences: Open User Settings (JSON)**, and add:
 
 Let your agent work. Every file it changes, creates or deletes shows up for review.
 
-- **Accept / Reject** appear above each change. Accept keeps it; Reject puts back what was there before. Either one jumps to the next change.
+- **Accept / Reject** appear above each change. Accept keeps it; Reject puts back what was there before. Either one jumps to the next change in the file; after a file's last change you stay put (use **Next Pending Change** to move on).
 - **New files** also get **Delete**: Reject empties the file, Delete removes it.
 - **Deleted files** appear in the side panel marked _deleted_. Click one to see what was removed, then use ✓ (keep deleted) or ↺ (restore) in the editor's top-right toolbar.
 - **Side panel**: the _Universal Agent Diff_ icon in the Activity Bar lists files with pending changes. Hover a file for **Accept all** / **Reject all**.

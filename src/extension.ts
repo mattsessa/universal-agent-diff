@@ -1354,16 +1354,14 @@ export async function activate(context: vscode.ExtensionContext) {
   /**
    * After a change is accepted or rejected, go to the next pending change in
    * the same file: the first one starting at or after `boundary` (the line just
-   * past the handled change), wrapping around. If the file has none left, open
-   * the next pending file, if any.
+   * past the handled change), wrapping around. If the file has none left, stay
+   * put: moving on to another file is left to Next Pending Change.
    */
   const jumpToNext = async (doc: vscode.TextDocument, boundary: number) => {
     const hunks = overlay.review(doc)?.hunks ?? [];
     if (hunks.length > 0) {
       const next = hunks.find((h) => h.newStart >= boundary) ?? hunks[0];
       await showLine(doc.uri, hunkLine(doc, next));
-    } else if (repos.pendingFiles().length > 0) {
-      await goToChange(1);
     }
   };
 

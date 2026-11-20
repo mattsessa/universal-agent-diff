@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Finishing a file no longer jumps to another file.** Accepting or rejecting a file's last change used to open the next pending file right away. You now stay in the file you just finished. Within a file, Accept / Reject still jump to the next change. Use **Next Pending Change** to move on to the next file.
+
 ## 1.2.0
 
 ### Fixed
