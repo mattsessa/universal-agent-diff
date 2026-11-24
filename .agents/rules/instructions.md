@@ -13,6 +13,7 @@ Universal Agent Diff: an interactive diff view VS Code extension for reviewing A
 - Nested repos (inside an open folder, even if the parent .gitignores them; submodules too) are found and reviewed on their own; new ones (git init / clone) picked up live.
 - Inline Accept / Reject on every change.
 - Added lines green; deleted lines shown as red blocks.
+- Replacing one of several identical lines shows as one change (red directly above green), not a separate add + delete.
 - My edits join an open review; otherwise ignored.
 - Snapshot cleared once everything accepted or rejected.
 - Watches closed files; detects changes without opening them.

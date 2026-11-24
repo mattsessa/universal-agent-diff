@@ -30,7 +30,41 @@ function computeHunks(oldText: string, newText: string): Hunk[] {
   if (oldText === newText) {
     return [];
   }
-  const parts = diffArrays(splitLines(oldText), splitLines(newText));
+  const parts = diffArrays(splitLines(oldText), splitLines(newText)).map((p) => ({
+    added: !!p.added,
+    removed: !!p.removed,
+    value: [...p.value],
+  }));
+  // With repeated lines a change can be described in several ways, e.g.
+  // replacing the first of two identical lines can come out as "add a line,
+  // keep one, delete the second". When the unchanged lines between two changes
+  // are identical to the end of the later change, slide that change up so the
+  // two join into one hunk (deleted lines then show with the lines that
+  // replaced them). The resulting text is the same either way.
+  for (let i = 2; i < parts.length; i++) {
+    const change = parts[i];
+    const kept = parts[i - 1];
+    const before = parts[i - 2];
+    const isChange = (p: { added: boolean; removed: boolean }) => p.added || p.removed;
+    if (!isChange(change) || isChange(kept) || !isChange(before)) {
+      continue;
+    }
+    // Slide one line at a time: the last kept line moves into the change and
+    // the change's last line (identical) becomes kept below it. Only apply it
+    // if the kept lines run out, i.e. the two changes actually join.
+    const keptLines = [...kept.value];
+    let moved = [...change.value];
+    const below: string[] = [];
+    while (keptLines.length > 0 && keptLines[keptLines.length - 1] === moved[moved.length - 1]) {
+      below.unshift(moved[moved.length - 1]);
+      moved = [keptLines.pop()!, ...moved.slice(0, -1)];
+    }
+    if (keptLines.length > 0) {
+      continue;
+    }
+    parts[i - 1] = { ...change, value: moved };
+    parts[i] = { added: false, removed: false, value: below };
+  }
   const hunks: Hunk[] = [];
   let oldLine = 0;
   let newLine = 0;

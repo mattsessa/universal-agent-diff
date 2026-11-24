@@ -83,6 +83,17 @@ Agent: in `.env.sandbox` next to this file, change `sandbox` to `staging`.
 
 ---
 
+## Test 7: Replacing one of two identical lines
+
+You: prompt your agent "Do test 7 in TEST_ME.md." You should see one change: the old line in red directly above the new green line, with one Accept / Reject. Not a green line with a separate red line below it.
+
+Agent: the two lines below are identical. Replace only the first one with `Repeated line, replaced by the agent.`
+
+Repeated line.
+Repeated line.
+
+---
+
 ## Also try
 
 - Side panel: the Universal Agent Diff icon lists every file with pending changes. Hover a file for Accept all / Reject all.
