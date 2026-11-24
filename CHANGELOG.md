@@ -1,14 +1,16 @@
 # Changelog
 
-## Unreleased
-
-### Changed
-
-- **Finishing a file no longer jumps to another file.** Accepting or rejecting a file's last change used to open the next pending file right away. You now stay in the file you just finished. Within a file, Accept / Reject still jump to the next change. Use **Next Pending Change** to move on to the next file.
+## 1.3.0
 
 ### Fixed
 
 - **Replacing one of several identical lines shows the old line with its replacement.** When a file had the same line twice in a row and the agent replaced the first one, the review could show it as two separate changes: the new line added in green, then the second copy deleted in red below it, each with its own Accept / Reject. It now shows as one change, with the deleted line in red directly above the new green line.
+
+## 1.2.1
+
+### Changed
+
+- **Finishing a file no longer jumps to another file.** Accepting or rejecting a file's last change used to open the next pending file right away. You now stay in the file you just finished. Within a file, Accept / Reject still jump to the next change. Use **Next Pending Change** to move on to the next file.
 
 ## 1.2.0
 
