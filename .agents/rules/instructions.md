@@ -31,6 +31,7 @@ Universal Agent Diff: an interactive diff view VS Code extension for reviewing A
 ## Notes
 
 - All code lives in `src/extension.ts`.
+- `KNOWN_ISSUES.md` (repo root): open bugs, their cause, what was tried, next steps. Read it before working on one; update it when anything changes.
 - `TEST_ME.md` (repo root) is an interactive demo: the user prompts their agent "Do test N in TEST_ME.md" (or a part, e.g. "test 1A") and reviews the result. Keep its tests in sync with the Functionality list above.
 - Red deleted-line blocks use proposed API `editorInsets`.
 - Requires `"enable-proposed-api": ["mattsessa.universal-agent-diff"]` in `~/.vscode/argv.json`.
