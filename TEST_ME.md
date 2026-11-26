@@ -94,11 +94,30 @@ Repeated line.
 
 ---
 
+## Test 8: Your renames aren't reviewed
+
+Renaming or moving a file in VS Code is your change, not the agent's.
+
+### Part A
+
+You: prompt your agent "Do test 8A in TEST_ME.md." Accept the new file. Then rename it to `renamed.txt` in the Explorer: nothing shows up for review.
+
+Agent: create a file named `rename-me.txt` next to this one, containing `hello`.
+
+### Part B
+
+You: prompt your agent "Do test 8B in TEST_ME.md." Don't accept it. Rename the file back to `rename-me.txt` in the Explorer: the pending change moves with it. Reject it, then delete the file.
+
+Agent: in `renamed.txt` next to this file, change `hello` to `goodbye`.
+
+---
+
 ## Also try
 
 - Side panel: the Universal Agent Diff icon lists every file with pending changes. Hover a file for Accept all / Reject all.
 - Command Palette: Next Pending Change / Previous Pending Change.
 - Restart VS Code with a change pending: it's still there.
+- Rename or drag a folder in the Explorer: nothing in it shows up for review (open a file in it afterwards to check), and pending changes inside move with it.
 - Multi-root workspace: File → Add Folder to Workspace… with a second Git repo, then have your agent change a file in each repo. Both show up in the side panel, labeled with their repo.
 - Nested repo: open a folder that contains another Git repo inside it, and have your agent change a file in the inner repo. It shows up labeled with the inner repo's name.
 - Debug log: Command Palette → Developer: Set Log Level… → Universal Agent Diff → Debug, then rerun any test and open Output → Universal Agent Diff. Each change is logged with its file path and what the extension decided, never file contents.

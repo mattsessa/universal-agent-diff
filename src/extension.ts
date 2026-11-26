@@ -269,6 +269,13 @@ class ReviewState implements vscode.Disposable {
   private startTree = '';
   private startPaths = new Set<string>();
   private ignored = new Map<string, boolean>();
+  /**
+   * Files and folders renamed or moved in VS Code this session: new path →
+   * where it was at startup (possibly in another repo). Files under a renamed
+   * path that haven't been seen since keep their startup content as known
+   * content, so the rename itself isn't reviewed.
+   */
+  private renamedFrom = new Map<string, { state: ReviewState; rel: string }>();
 
   private _onDidChangeSnapshots = new vscode.EventEmitter<void>();
   /** Fires when a snapshot is created, updated, or deleted. */
@@ -411,6 +418,61 @@ class ReviewState implements vscode.Disposable {
     return [...keys].filter((k) => k === rel || k.startsWith(rel + '/'));
   }
 
+  /** Where a path was at startup, if it (or a folder above it) was renamed in VS Code. */
+  private renameOrigin(rel: string): { state: ReviewState; rel: string } | undefined {
+    const key = [...this.renamedFrom.keys()]
+      .filter((k) => rel === k || rel.startsWith(k + '/'))
+      .sort((a, b) => b.length - a.length)[0];
+    const origin = key === undefined ? undefined : this.renamedFrom.get(key);
+    return origin && { state: origin.state, rel: origin.rel + rel.slice(key!.length) };
+  }
+
+  /** Forget renames at or under a path that was deleted. */
+  forgetRenames(rel: string): void {
+    for (const k of [...this.renamedFrom.keys()]) {
+      if (k === rel || k.startsWith(rel + '/')) {
+        this.renamedFrom.delete(k);
+      }
+    }
+  }
+
+  /**
+   * `oldRel` in `from` (this repo or another) was renamed or moved in VS Code
+   * to `newRel` here. Pending reviews and last seen content move with it; its
+   * other files keep their startup content as known content.
+   */
+  movedFrom(from: ReviewState, oldRel: string, newRel: string): void {
+    debug(`${from.label(oldRel)}: renamed in VS Code to ${this.label(newRel)}`);
+    const moved = (k: string) => newRel + k.slice(oldRel.length);
+    const origin = from.renameOrigin(oldRel) ?? { state: from, rel: oldRel };
+    this.forgetRenames(newRel);
+    for (const [k, v] of [...from.renamedFrom]) {
+      if (k.startsWith(oldRel + '/')) {
+        this.renamedFrom.set(moved(k), v);
+      }
+    }
+    from.forgetRenames(oldRel);
+    if (origin.state !== this || origin.rel !== newRel) {
+      this.renamedFrom.set(newRel, origin);
+    }
+    for (const k of from.knownUnder(oldRel)) {
+      const snapshot = from.snapshots.get(k);
+      if (snapshot !== undefined) {
+        if (from.deleted.has(k)) {
+          this.markDeleted(moved(k), snapshot);
+        } else {
+          this.setSnapshot(moved(k), snapshot);
+        }
+        from.deleteSnapshot(k);
+      }
+      const seen = from.lastSeen.get(k);
+      if (seen !== undefined) {
+        this.lastSeen.set(moved(k), seen);
+        from.lastSeen.delete(k);
+      }
+    }
+  }
+
   /**
    * Whether source control (not an agent) removed a file: a git operation is
    * running (index lock held), or git no longer stages the file but HEAD still
@@ -454,8 +516,9 @@ class ReviewState implements vscode.Disposable {
 
   /**
    * Last known disk content of a file: as last seen this session, else as it
-   * was at startup, else empty (new file). Undefined for files that aren't
-   * reviewed (see `isReviewed`).
+   * was at startup (where it was then, if renamed in VS Code since), else
+   * empty (new file). Undefined for files that aren't reviewed (see
+   * `isReviewed`).
    */
   async knownContent(rel: string): Promise<string | undefined> {
     if (!(await this.isReviewed(rel))) {
@@ -465,6 +528,15 @@ class ReviewState implements vscode.Disposable {
     if (seen !== undefined) {
       return seen;
     }
+    const origin = this.renameOrigin(rel);
+    if (origin) {
+      return origin.state.startContent(origin.rel);
+    }
+    return this.startContent(rel);
+  }
+
+  /** A file's content at startup, or empty if it didn't exist then. */
+  private async startContent(rel: string): Promise<string> {
     if (this.startPaths.has(rel)) {
       return git(this.repoRoot, ['cat-file', 'blob', `${this.startTree}:${rel}`]);
     }
@@ -1151,8 +1223,15 @@ export async function activate(context: vscode.ExtensionContext) {
     state.lastSeen.set(rel, current);
   };
 
-  /** Paths being deleted by VS Code itself (Explorer, our Reject / Delete); kept for 5s. */
+  /**
+   * Paths being deleted by VS Code itself (Explorer, our Reject / Delete, the
+   * old path of a rename in VS Code); kept for 5s.
+   */
   const ownDeletes = new Set<string>();
+  const markOwnDelete = (fsPath: string) => {
+    ownDeletes.add(fsPath);
+    setTimeout(() => ownDeletes.delete(fsPath), 5000);
+  };
   const isOwnDelete = (fsPath: string) =>
     [...ownDeletes].some((p) => fsPath === p || fsPath.startsWith(p + path.sep));
 
@@ -1172,6 +1251,9 @@ export async function activate(context: vscode.ExtensionContext) {
       await state.recheckIgnored();
     }
     const own = isOwnDelete(uri.fsPath);
+    if (!(await exists(uri.fsPath))) {
+      state.forgetRenames(rel);
+    }
     // A deleted folder may only report itself: also check the files under it.
     const tracked = await git(state.repoRoot, ['ls-files', '-z', '--', rel]).then(
       (out) => out.split('\0').filter(Boolean),
@@ -1523,11 +1605,20 @@ export async function activate(context: vscode.ExtensionContext) {
     panel,
     { dispose: () => [...repoDisposables.keys()].forEach(removeRepo) },
     vscode.workspace.onDidChangeWorkspaceFolders(() => void syncRepos()),
-    vscode.workspace.onWillDeleteFiles((e) => {
-      for (const f of e.files) {
-        ownDeletes.add(f.fsPath);
-        setTimeout(() => ownDeletes.delete(f.fsPath), 5000);
+    vscode.workspace.onWillDeleteFiles((e) => e.files.forEach((f) => markOwnDelete(f.fsPath))),
+    // Renames and moves in VS Code (Explorer) are mine, not the agent's: the
+    // old path's deletion is ignored, and reviews and known content move to
+    // the new path, so it isn't seen as a new file.
+    vscode.workspace.onWillRenameFiles((e) => {
+      for (const { oldUri, newUri } of e.files) {
+        markOwnDelete(oldUri.fsPath);
+        const from = repos.fileOf(oldUri);
+        const to = repos.fileOf(newUri);
+        if (from && to) {
+          to.state.movedFrom(from.state, from.rel, to.rel);
+        }
       }
+      overlay.refresh();
     }),
     deletedContent,
     vscode.workspace.registerTextDocumentContentProvider(DELETED_SCHEME, {

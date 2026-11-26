@@ -15,6 +15,7 @@ Universal Agent Diff: an interactive diff view VS Code extension for reviewing A
 - Added lines green; deleted lines shown as red blocks.
 - Replacing one of several identical lines shows as one change (red directly above green), not a separate add + delete.
 - My edits join an open review; otherwise ignored.
+- My renames / moves in VS Code (Explorer) aren't reviewed; a pending review moves with the file.
 - Snapshot cleared once everything accepted or rejected.
 - Watches closed files; detects changes without opening them.
 - Tracks env files even though they're gitignored: `.env`, `.env.*`, `*.env`, `.envrc`.

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.1
+
+### Fixed
+
+- **Renaming or moving files in VS Code is no longer reviewed as an agent change.** Renaming a file or folder in the Explorer (or dragging it somewhere else) used to show up as the agent deleting the old file and creating a new one. It's now treated as your change and ignored. If the file had a pending review, the review moves with it.
+
 ## 1.3.0
 
 ### Fixed
